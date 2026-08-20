@@ -1,0 +1,162 @@
+# Push CI reads the committed outputs. It never runs a cell. That is the right
+# trade on every push and the wrong one for a repository that then sits still
+# for a year, because the way this notebook breaks next is not a way committed
+# outputs can show.
+#
+# The worked example is already in the tree. scikit-learn deprecated `penalty`
+# on LogisticRegression in 1.8 and removes it in 1.10, and the three grid
+# searches in this notebook used to search over it. Under the pinned 1.9.0 the
+# call still works and only warns:
+#
+#   FutureWarning: 'penalty' was deprecated in version 1.8 and will be removed
+#   in 1.10.
+#
+# The first cell of the notebook calls warnings.filterwarnings('ignore'), so
+# that line is never printed, never committed, and invisible to anyone reading
+# the outputs on GitHub. I found it by hand while porting the notebook and moved
+# the grids to `l1_ratio`, which the README documents and proves is the same
+# model under `solver='liblinear'`. Nothing in this repository found it with me:
+# push CI executes no code, and the verifier checks numbers that have not moved.
+# Had I missed it, 1.10 would have turned a warning nobody could see into cells
+# that raise, and I would have heard about it when a stranger opened an issue.
+#
+# That is the entire argument for this file. The next deprecation gets found on
+# a Sunday morning by me instead. Execute the notebooks weekly: once on the
+# pins, which has to stay green, and once on whatever PyPI is serving that
+# morning, which is allowed to fail. The second job is an early warning that an
+# upstream release is coming for this repository. It is not a claim that I have
+# adopted it.
+
+name: scheduled-execute
+
+on:
+  schedule:
+    # Sunday 06:17 UTC. Off the top of the hour on purpose: jobs scheduled at
+    # :00 queue behind everyone else's and start late on the shared runners.
+    # Sunday so a break is already sitting there when the week starts, and 06:17
+    # UTC is early afternoon in Bangkok, which is where I would be reading it.
+    - cron: "17 6 * * 0"
+  workflow_dispatch:
+
+# Read only. This workflow executes notebooks, and the committed outputs are what
+# the verifier checks the README against, so nothing here is allowed to write
+# back to the repository.
+permissions:
+  contents: read
+
+jobs:
+  pinned:
+    name: notebooks execute on the pins
+    runs-on: ubuntu-latest
+    # The slowest cell alone is allowed 1800s below. An hour covers the install,
+    # both notebooks and that cell, and still kills a hang long before the
+    # six hour default bills me for it.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Same version as ci.yml and requirements.txt.
+          python-version: "3.11"
+
+      - name: graphviz binaries
+        # The graphviz pin is only the Python wrapper. Cell 65 shells out to
+        # `dot` to render the decision tree, so the binaries have to be on PATH.
+        # This is the install push CI declined to pay for.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y graphviz
+
+      - name: install the pins
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: execute the attrition notebook
+        working-directory: code
+        # Output goes to the runner's temp directory, never --inplace, so a CI
+        # run cannot rewrite the committed outputs even by accident. The 1800s
+        # is the timeout the README tells readers to use, for the same reason:
+        # the slowest cell is a randomized search over 800 candidates at 5 folds,
+        # and the nbconvert default would kill it partway through.
+        run: |
+          jupyter nbconvert --to notebook --execute "HRM_Employee Attrition.ipynb" \
+            --output-dir "$RUNNER_TEMP" \
+            --output attrition-executed.ipynb \
+            --ExecutePreprocessor.timeout=1800
+
+      - name: execute the fairness audit, if it is in the tree yet
+        working-directory: code
+        # Guarded because that notebook is being written now and is not committed
+        # yet. Absent, this says so and passes. Present and broken, nbconvert
+        # exits non-zero inside the branch and the job fails, which is the point.
+        run: |
+          if [ -f "fairness_audit.ipynb" ]; then
+            jupyter nbconvert --to notebook --execute "fairness_audit.ipynb" \
+              --output-dir "$RUNNER_TEMP" \
+              --output fairness-executed.ipynb \
+              --ExecutePreprocessor.timeout=1800
+          else
+            echo "code/fairness_audit.ipynb is not here yet. Nothing to execute."
+          fi
+
+  latest:
+    name: notebooks execute on today's PyPI
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # An upstream release is not a failure of this repository. This job reports
+    # and does not turn the repository red for a version I have not adopted.
+    # Read it, then decide whether to bump the pins.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Held at 3.11 so the package versions are the only thing that differs
+          # from the job above. That has a limit worth stating plainly: if a new
+          # release drops 3.11, pip resolves quietly to an older one instead and
+          # this job goes green having tested nothing new. The freeze below is
+          # how you check that rather than assume it.
+          python-version: "3.11"
+
+      - name: graphviz binaries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y graphviz
+
+      - name: install without the pins
+        # Strips the version specifiers off requirements.txt rather than listing
+        # the packages a second time, so this job cannot drift from the set the
+        # pinned job installs. Comments and blank lines pass through and pip
+        # ignores them.
+        run: |
+          python -m pip install --upgrade pip
+          sed 's/==.*//' requirements.txt > "$RUNNER_TEMP/requirements-latest.txt"
+          pip install -r "$RUNNER_TEMP/requirements-latest.txt"
+
+      - name: what actually resolved
+        # The useful half of this job. When it fails, this is the list to diff
+        # against requirements.txt to find which release did it.
+        run: pip freeze
+
+      - name: execute the attrition notebook
+        working-directory: code
+        run: |
+          jupyter nbconvert --to notebook --execute "HRM_Employee Attrition.ipynb" \
+            --output-dir "$RUNNER_TEMP" \
+            --output attrition-executed.ipynb \
+            --ExecutePreprocessor.timeout=1800
+
+      - name: execute the fairness audit, if it is in the tree yet
+        working-directory: code
+        run: |
+          if [ -f "fairness_audit.ipynb" ]; then
+            jupyter nbconvert --to notebook --execute "fairness_audit.ipynb" \
+              --output-dir "$RUNNER_TEMP" \
+              --output fairness-executed.ipynb \
+              --ExecutePreprocessor.timeout=1800
+          else
+            echo "code/fairness_audit.ipynb is not here yet. Nothing to execute."
+          fi

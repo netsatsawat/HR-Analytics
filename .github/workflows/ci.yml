@@ -1,0 +1,47 @@
+# Two things break a repository like this one, and CI checks both.
+#
+# The first is rot in the dependencies. This notebook sat for seven years
+# and stopped running somewhere in the middle: `sklearn.metrics.scorer`
+# went away in scikit-learn 0.24 and the first import cell has raised ever
+# since. Nobody noticed because nothing ever installed it again. So the
+# install step below is a check, not setup: if requirements.txt stops
+# resolving, the build fails.
+#
+# The second is the README drifting away from the notebook. Every number
+# published on the front page is recomputed by verify_readme_claims.py
+# from the committed notebook outputs and the committed CSV, and the
+# README has to literally contain the result. That script is stdlib only,
+# so it would run without the install above; it is kept after it so a
+# broken pin fails first and reads as what it is.
+#
+# CI does not execute the notebook. That needs the Graphviz binaries for
+# the decision tree render in cell 65, and a run takes long enough that it
+# would be the slowest thing here without checking anything the committed
+# outputs do not already prove. The structural checks in the verifier
+# cover what matters: every code cell ran, in order, with no errors.
+
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # The version requirements.txt was resolved on, and the one the
+          # committed notebook outputs were produced with.
+          python-version: "3.11"
+
+      - name: pinned dependencies still resolve
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: every README number matches its artifact
+        run: python scripts/verify_readme_claims.py

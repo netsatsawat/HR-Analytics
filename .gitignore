@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv*/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# Graphviz renders written by the notebook at run time. Filenames contain spaces
+# and the content is reproducible, so it is regenerated rather than committed.
+img/output/

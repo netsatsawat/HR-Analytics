@@ -36,18 +36,20 @@ from sklearn import tree
 from sklearn.ensemble import RandomForestClassifier
 import xgboost
 from sklearn.metrics import confusion_matrix, accuracy_score, classification_report
-from sklearn.metrics import roc_auc_score, roc_curve, scorer
-from sklearn.metrics import precision_score, recall_score, f1_score, precision_recall_curve
+from sklearn.metrics import roc_auc_score, roc_curve
+from sklearn.metrics import (
+    precision_score, recall_score, f1_score, precision_recall_curve
+)
 
 # Visualize the tree model
 import graphviz
-import scikitplot as skplt
 
 def quick_df_explorer(df: pd.DataFrame):
     print('Number of observations: %s, Number of columns / features: %s' % \
       (df.shape[0], df.shape[1]))
 
-    _dtypes = df.columns.to_series().groupby(df.dtypes).groups
+    # sort=False because pandas cannot order a StringDtype against a numpy dtype
+    _dtypes = df.columns.to_series().groupby(df.dtypes, sort=False).groups
     print('\nThe data types are %s' % {k.name: v for k, v in _dtypes.items()}) 
     print('\nThe statistic of each columns:\n')
     display(df.describe())
@@ -67,9 +69,17 @@ def get_missing_values(df,
     mis_val = df.isnull().sum()
     mis_val_percent = 100 * df.isnull().sum() / len(df)
     mis_val_table = pd.concat([mis_val, mis_val_percent], axis=1)
-    mis_val_table_ren_columns = mis_val_table.rename(columns = {0 : 'Missing Values', 1 : '% of Total Values'})
-    mis_val_table_ren_columns = mis_val_table_ren_columns[mis_val_table_ren_columns.iloc[:,1] != 0].sort_values('% of Total Values', ascending=False).round(1)
-    print("There are %s columns that have missing values" % str(mis_val_table_ren_columns.shape[0]))
+    mis_val_table_ren_columns = mis_val_table.rename(
+        columns = {0 : 'Missing Values', 1 : '% of Total Values'}
+    )
+    mis_val_table_ren_columns = (
+        mis_val_table_ren_columns[mis_val_table_ren_columns.iloc[:,1] != 0]
+        .sort_values('% of Total Values', ascending=False).round(1)
+    )
+    print(
+        "There are %s columns that have missing values"
+        % str(mis_val_table_ren_columns.shape[0])
+    )
     if return_missing_df_flag:
         return mis_val_table_ren_columns
 
@@ -155,7 +165,8 @@ def prediction_evaluation (algorithm, X_train, X_test, y_train, y_test,
                            predictor_cols, cf = 'features'):
     """
      Function to predict and evaluate the provided algorithm by using Plotly library 
-       to visualize the confusion matrix, ROC curve as well as provided the feature importances.
+       to visualize the confusion matrix, ROC curve as well as provided the
+       feature importances.
      @Args:
        algorithm: the model algorithm object
        X_train: the predictor features of the training pandas data frame
@@ -222,7 +233,7 @@ def prediction_evaluation (algorithm, X_train, X_test, y_train, y_test,
     colors = ['gold', 'lightgreen', 'lightcoral', 'lightskyblue']
     trace2 = go.Bar(x=(show_metrics[0].values), 
                     y=['Accuracy', 'Precision', 'Recall', 'F1 score'], 
-                    text=np.round_(show_metrics[0].values,4),
+                    text=np.round(show_metrics[0].values,4),
                     name='',
                     textposition='auto',
                     orientation='h', 
@@ -290,7 +301,8 @@ def prediction_evaluation (algorithm, X_train, X_test, y_train, y_test,
     fig.append_trace(trace5, 2, 2)
     fig.append_trace(trace6, 3, 1)
     
-    fig['layout'].update(showlegend = False, title = "Model Performance of {}".format(algorithm_name),
+    fig['layout'].update(showlegend = False,
+                         title = "Model Performance of {}".format(algorithm_name),
                          autosize = False,
                          height = 1000,
                          width = 800,
@@ -312,9 +324,133 @@ def prediction_evaluation (algorithm, X_train, X_test, y_train, y_test,
                                         tickangle=90
                                        )
                                   )
-    fig.layout.titlefont.size = 14
+    fig.layout.title.font.size = 14
     py.iplot(fig)
     return y_pred, y_prob
+
+
+def _cumulative_gain_curve(y_true, y_score, pos_label):
+    """
+    Function to compute one cumulative gain curve: the share of all positives that is
+      captured once the sample is ranked by score and read from the highest score down.
+      This is the shared building block of the gain chart and the lift chart.
+    @Args:
+      y_true: the array of actual labels
+      y_score: the array of predicted probabilities for the class of interest
+      pos_label: the label value that counts as the positive class for this curve
+
+    Return:
+      percentages: the fraction of the sample read so far, starting at 0.
+      gains: the fraction of all positives captured so far, starting at 0.
+    """
+    y_true = np.asarray(y_true)
+    y_score = np.asarray(y_score)
+    is_pos = (y_true == pos_label)
+    sorted_idx = np.argsort(y_score, kind='mergesort')[::-1]
+    is_pos = is_pos[sorted_idx]
+
+    gains = np.cumsum(is_pos) / float(np.sum(is_pos))
+    percentages = np.arange(1, len(is_pos) + 1) / float(len(is_pos))
+    # Prepend the origin so both curves start from (0, 0)
+    return np.insert(percentages, 0, 0.), np.insert(gains, 0, 0.)
+
+
+def plot_cumulative_gain(y_true, y_probas, title: str='Cumulative Gains Curve',
+                         figsize: tuple=None, ax=None):
+    """
+    Function to plot the cumulative gains chart of a binary classifier.
+      It answers "if I contact the top X% of employees by attrition score, what
+      share of the
+      leavers do I reach?". The diagonal baseline is what contacting people at
+      random gives you.
+      Written here with plain matplotlib rather than pulling in a charting dependency.
+    @Args:
+      y_true: the array of actual labels
+      y_probas: the (n_samples, 2) array of predicted probabilities, as returned
+        by predict_proba
+      title: string to be title of the plot
+      figsize: tuple of the figure size, passed straight to matplotlib
+      ax: an existing matplotlib axes to draw on; a new one is created when this is None
+
+    Return:
+      The matplotlib axes holding the plot
+    """
+    y_true = np.asarray(y_true)
+    y_probas = np.asarray(y_probas)
+    classes = np.unique(y_true)
+    if len(classes) != 2:
+        print("ERROR: plot_cumulative_gain only supports 2 classes. Please recheck")
+        return None
+
+    pct_0, gains_0 = _cumulative_gain_curve(y_true, y_probas[:, 0], classes[0])
+    pct_1, gains_1 = _cumulative_gain_curve(y_true, y_probas[:, 1], classes[1])
+
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+
+    ax.plot(pct_0, gains_0, lw=3, label='Class {}'.format(classes[0]))
+    ax.plot(pct_1, gains_1, lw=3, label='Class {}'.format(classes[1]))
+    ax.plot([0, 1], [0, 1], 'k--', lw=2, label='Baseline')
+
+    ax.set_title(title, fontsize='large')
+    ax.set_xlabel('Percentage of sample', fontsize='medium')
+    ax.set_ylabel('Gain', fontsize='medium')
+    ax.set_xlim([0., 1.])
+    ax.set_ylim([0., 1.])
+    ax.tick_params(labelsize='medium')
+    ax.grid(True)
+    ax.legend(loc='lower right', fontsize='medium')
+    return ax
+
+
+def plot_lift_curve(y_true, y_probas, title: str='Lift Curve',
+                    figsize: tuple=None, ax=None):
+    """
+    Function to plot the lift chart of a binary classifier.
+      Lift is the cumulative gain divided by the share of the sample read, so it reads as
+      "how many times better than random is the model over the top X%". A lift of
+      1 is random.
+      Written here with plain matplotlib rather than pulling in a charting dependency.
+    @Args:
+      y_true: the array of actual labels
+      y_probas: the (n_samples, 2) array of predicted probabilities, as returned
+        by predict_proba
+      title: string to be title of the plot
+      figsize: tuple of the figure size, passed straight to matplotlib
+      ax: an existing matplotlib axes to draw on; a new one is created when this is None
+
+    Return:
+      The matplotlib axes holding the plot
+    """
+    y_true = np.asarray(y_true)
+    y_probas = np.asarray(y_probas)
+    classes = np.unique(y_true)
+    if len(classes) != 2:
+        print("ERROR: plot_lift_curve only supports 2 classes. Please recheck")
+        return None
+
+    percentages, gains_0 = _cumulative_gain_curve(y_true, y_probas[:, 0], classes[0])
+    _, gains_1 = _cumulative_gain_curve(y_true, y_probas[:, 1], classes[1])
+
+    # Drop the origin, lift is undefined when no sample has been read yet
+    percentages = percentages[1:]
+    gains_0 = gains_0[1:] / percentages
+    gains_1 = gains_1[1:] / percentages
+
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+
+    ax.plot(percentages, gains_0, lw=3, label='Class {}'.format(classes[0]))
+    ax.plot(percentages, gains_1, lw=3, label='Class {}'.format(classes[1]))
+    ax.plot([0, 1], [1, 1], 'k--', lw=2, label='Baseline')
+
+    ax.set_title(title, fontsize='large')
+    ax.set_xlabel('Percentage of sample', fontsize='medium')
+    ax.set_ylabel('Lift', fontsize='medium')
+    ax.tick_params(labelsize='medium')
+    ax.grid(True)
+    ax.legend(loc='lower left', fontsize='medium')
+    return ax
 
 
 def gen_pred_band (val):
@@ -369,7 +505,9 @@ def gen_pred_band (val):
         
     return this
 
-def prepareDeciles(df,probability_col='probability',decile_columns='deciles',inplace=True):
+def prepareDeciles(
+    df,probability_col='probability',decile_columns='deciles',inplace=True
+):
     """
     Function to get deciles from probability values
     
@@ -396,10 +534,12 @@ def prepareDeciles(df,probability_col='probability',decile_columns='deciles',inp
 def get_deciles_analysis(df,score="prob",target="actual"):
     """
     *Deprecated use decile_analysis instead*
-    Get decile analysis; see distibution of events(ones) and non-events(zeros) on different deciles
+    Get decile analysis; see distibution of events(ones) and non-events(zeros)
+    on different deciles
     
     Arguments:
-    df = A pandas dataframe with atleast two columns one with calculated probabilities using model and another with  actual label
+    df = A pandas dataframe with atleast two columns one with calculated
+         probabilities using model and another with  actual label
     score = name of probability column
     target = name of actual columns
     
@@ -411,7 +551,10 @@ def get_deciles_analysis(df,score="prob",target="actual"):
     _,bins = pd.qcut(df1[score],10,retbins=True,duplicates='drop')
     bins[0] -= 0.001
     bins[-1] += 0.001
-    bins_labels = ['%d.(%0.2f,%0.2f]'%(9-x[0],x[1][0],x[1][1]) for x in enumerate(zip(bins[:-1],bins[1:]))]
+    bins_labels = [
+        '%d.(%0.2f,%0.2f]'%(9-x[0],x[1][0],x[1][1])
+        for x in enumerate(zip(bins[:-1],bins[1:]))
+    ]
     bins_labels[0] = bins_labels[0].replace('(','[')
     df1['Decile']=pd.cut(df1[score],bins=bins,labels=bins_labels)
     df1['Population']=1
@@ -420,14 +563,17 @@ def get_deciles_analysis(df,score="prob",target="actual"):
     summary=df1.groupby(['Decile'])[['Ones','Zeros','Population']].sum()
     summary=summary.sort_index(ascending=False)
     summary['TargetRate']=summary['Ones']/summary['Population']
-    summary['CumulativeTargetRate']=summary['Ones'].cumsum()/summary['Population'].cumsum()
+    summary['CumulativeTargetRate']=(
+        summary['Ones'].cumsum()/summary['Population'].cumsum()
+    )
     summary['TargetsCaptured']=summary['Ones'].cumsum()/summary['Ones'].sum()
     return summary
 
 
 def decile_analysis(estimator, X, Y):
     """
-    Get decile analysis; see distibution of events(ones) and non-events(zeros) on different deciles
+    Get decile analysis; see distibution of events(ones) and non-events(zeros)
+    on different deciles
     
     Arguments:
     estimator = model with which probabilities will be calculated
@@ -440,7 +586,9 @@ def decile_analysis(estimator, X, Y):
     By:
     Cognizant-Aetna Team
     """
-    return get_deciles_analysis(pd.DataFrame({"prob":estimator.predict_proba(X)[:,1],"actual":Y}))
+    return get_deciles_analysis(
+        pd.DataFrame({"prob":estimator.predict_proba(X)[:,1],"actual":Y})
+    )
 
 
 if __name__ == '__main__':

@@ -1,0 +1,35 @@
+# Pinned to the versions the committed notebook outputs were produced with.
+# Run on Python 3.11.15.
+#
+# macOS note: xgboost imports but cannot dlopen without libomp.
+#   brew install libomp
+# The graphviz package below is only the Python wrapper. Rendering the decision
+# tree also needs the Graphviz binaries on PATH:
+#   brew install graphviz
+
+# --- data + numerics ---------------------------------------------------------
+pandas==3.0.5
+numpy==2.4.6
+scipy==1.17.1
+
+# --- models ------------------------------------------------------------------
+scikit-learn==1.9.0
+xgboost==3.2.0
+statsmodels==0.14.6
+
+# --- plotting ----------------------------------------------------------------
+matplotlib==3.11.1
+seaborn==0.13.2
+plotly==6.9.0
+graphviz==0.21
+
+# --- running the notebook ----------------------------------------------------
+jupyter==1.1.1
+ipykernel==7.3.0
+nbconvert==7.17.1
+
+# --- deliberately absent -----------------------------------------------------
+# scikit-plot: dead since scipy 1.12. scikit-plot 0.3.7 does `from scipy import
+#              interp`, which no longer exists, so importing it fails outright.
+#              It drew exactly two charts here (cumulative gain and lift). Both
+#              are now produced inside the notebook without it.
